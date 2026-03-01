@@ -1,0 +1,31 @@
+# Binaries
+codebench
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+/bin/
+/dist/
+
+# Go
+vendor/
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Temporary benchmark outputs
+/tmp/
+*.benchmark.json
+
+# Debug
+__debug_bin*

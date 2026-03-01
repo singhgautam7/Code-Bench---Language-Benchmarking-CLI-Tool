@@ -1,0 +1,7 @@
+name: binary_search
+input_mode: stdin
+timeout_ms: 2000
+languages:
+  - python
+  - go
+  - cpp
