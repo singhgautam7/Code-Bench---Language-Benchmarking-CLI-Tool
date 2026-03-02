@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -11,8 +12,10 @@ import (
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/spf13/cobra"
 
-	"github.com/gautam/codebench/internal/benchmark"
-	"github.com/gautam/codebench/internal/problems"
+	"github.com/singhgautam7/Code-Bench---Language-Benchmarking-CLI-Tool/internal/benchmark"
+	"github.com/singhgautam7/Code-Bench---Language-Benchmarking-CLI-Tool/internal/export"
+	"github.com/singhgautam7/Code-Bench---Language-Benchmarking-CLI-Tool/internal/problems"
+	"github.com/singhgautam7/Code-Bench---Language-Benchmarking-CLI-Tool/internal/ui"
 )
 
 var (
@@ -21,6 +24,9 @@ var (
 	flagRuns      int
 	flagWarmup    int
 	flagTimeoutMs int
+	flagParallel  int
+	flagExport    string
+	flagVerbose   bool
 )
 
 var runCmd = &cobra.Command{
@@ -29,8 +35,8 @@ var runCmd = &cobra.Command{
 	Long: `Run benchmarks for a specified problem across one or more languages.
 Each language implementation is built and executed inside a Docker container
 for isolation and reproducibility.`,
-	Args: cobra.ExactArgs(1),
-	RunE: runBenchmark,
+	Args:    cobra.ExactArgs(1),
+	RunE:    runBenchmark,
 }
 
 func init() {
@@ -39,12 +45,18 @@ func init() {
 	runCmd.Flags().IntVar(&flagRuns, "runs", 5, "Number of measured runs per language")
 	runCmd.Flags().IntVar(&flagWarmup, "warmup", 1, "Number of warmup runs per language")
 	runCmd.Flags().IntVar(&flagTimeoutMs, "timeout-ms", 0, "Timeout per run in milliseconds (default: from problem.yaml)")
+	runCmd.Flags().IntVar(&flagParallel, "parallel", 1, "Max number of concurrent language benchmarks")
+	runCmd.Flags().StringVar(&flagExport, "export", "", "Export results to file (.json or .csv)")
+	runCmd.Flags().BoolVar(&flagVerbose, "show-all-logs", false, "Show full Docker and command logs (disables progress bars)")
 
 	rootCmd.AddCommand(runCmd)
 }
 
 func runBenchmark(cmd *cobra.Command, args []string) error {
 	problemName := args[0]
+
+	// Sync verbose state across UI models
+	ui.Verbose = flagVerbose
 
 	// Load problem spec first (gives useful errors even without Docker)
 	spec, err := problems.LoadProblem(problemName)
@@ -56,7 +68,6 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 	langs := spec.Languages
 	if flagLangs != "" {
 		langs = strings.Split(flagLangs, ",")
-		// Trim whitespace
 		for i := range langs {
 			langs[i] = strings.TrimSpace(langs[i])
 		}
@@ -66,7 +77,7 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no languages specified")
 	}
 
-	// Check Docker availability (after validation so config errors show first)
+	// Check Docker availability
 	if err := benchmark.CheckDockerAvailable(); err != nil {
 		return err
 	}
@@ -80,15 +91,20 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 		timeoutMs = 2000 // default fallback
 	}
 
-	// Print configuration
+	// Print configuration if not verbose (verbose implies a mess of logs anyway, but let's keep header)
 	fmt.Fprintf(os.Stderr, "╔══════════════════════════════════════════╗\n")
-	fmt.Fprintf(os.Stderr, "║          CodeBench — Phase 1             ║\n")
+	fmt.Fprintf(os.Stderr, "║          CodeBench — Phase 2             ║\n")
 	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════════╝\n")
 	fmt.Fprintf(os.Stderr, "  Problem:   %s\n", spec.Name)
 	fmt.Fprintf(os.Stderr, "  Languages: %s\n", strings.Join(langs, ", "))
 	fmt.Fprintf(os.Stderr, "  Input:     %s\n", flagInput)
 	fmt.Fprintf(os.Stderr, "  Runs:      %d (warmup: %d)\n", flagRuns, flagWarmup)
 	fmt.Fprintf(os.Stderr, "  Timeout:   %dms\n", timeoutMs)
+	fmt.Fprintf(os.Stderr, "  Parallel:  %d\n", flagParallel)
+	fmt.Fprintf(os.Stderr, "  Export:    %s\n", flagExport)
+	if flagVerbose {
+		fmt.Fprintf(os.Stderr, "  Output:    Verbose (--show-all-logs)\n")
+	}
 
 	// Run benchmarks
 	config := benchmark.RunConfig{
@@ -98,53 +114,161 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 		Runs:      flagRuns,
 		Warmup:    flagWarmup,
 		TimeoutMs: timeoutMs,
+		Parallel:  flagParallel,
+		Verbose:   flagVerbose,
 	}
 
-	results, err := benchmark.RunBenchmark(config)
+	ui.StartSpinner(" Benchmarking, please wait...")
+
+	metadata, results, err := benchmark.RunBenchmark(config)
+
+	ui.StopSpinner()
+
 	if err != nil {
 		return err
 	}
 
-	// Sort results by median execution time (ascending)
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Stats.Median < results[j].Stats.Median
+	// Sort: OK results by median ascending, then failures at the bottom
+	sort.SliceStable(results, func(i, j int) bool {
+		iOK := results[i].Status == benchmark.StatusOK
+		jOK := results[j].Status == benchmark.StatusOK
+		if iOK && jOK {
+			return results[i].Stats.Median < results[j].Stats.Median
+		}
+		if iOK && !jOK {
+			return true // OK comes before failures
+		}
+		return false
 	})
 
-	// Display results table
+	// Display results
 	fmt.Fprintln(os.Stderr)
-	printResultsTable(results)
+	renderSummaryLines(results)
+	fmt.Fprintln(os.Stderr)
+	renderPerformanceTable(results)
+
+	// Handle Export
+	if flagExport != "" {
+		report := export.Report{
+			Metadata: metadata,
+			Results:  results,
+		}
+
+		ext := strings.ToLower(filepath.Ext(flagExport))
+		var exportErr error
+
+		if ext == ".json" {
+			exportErr = export.WriteJSON(report, flagExport)
+		} else if ext == ".csv" {
+			exportErr = export.WriteCSV(report, flagExport)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n⚠ Unsupported export format %q. Please use .json or .csv\n", ext)
+			return nil
+		}
+
+		if exportErr != nil {
+			fmt.Fprintf(os.Stderr, "\n✗ Failed to export results to %s: %v\n", flagExport, exportErr)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n✓ Successfully exported results to %s\n", flagExport)
+		}
+	}
 
 	return nil
 }
 
-// printResultsTable renders benchmark results as a formatted table.
-func printResultsTable(results []benchmark.BenchmarkResult) {
+// ANSI Escape Codes
+const (
+	ColorReset   = "\033[0m"
+	ColorRed     = "\033[31m"
+	ColorGreen   = "\033[32m"
+	ColorYellow  = "\033[33m"
+	ColorMagenta = "\033[35m"
+)
+
+func colorizeStatus(status string) string {
+	switch status {
+	case benchmark.StatusOK:
+		return ColorGreen + status + ColorReset
+	case benchmark.StatusFailed, benchmark.StatusNoSuccessfulRuns:
+		return ColorRed + status + ColorReset
+	case benchmark.StatusTimeout:
+		return ColorYellow + status + ColorReset
+	case benchmark.StatusBuildError:
+		return ColorMagenta + status + ColorReset
+	default:
+		return status
+	}
+}
+
+// renderSummaryLines prints out the metadata for each language before the main performance table.
+func renderSummaryLines(results []benchmark.BenchmarkResult) {
+	// Find the longest language name for alignment
+	maxLangLen := 0
+	for _, r := range results {
+		if len(r.Language) > maxLangLen {
+			maxLangLen = len(r.Language)
+		}
+	}
+
+	for _, r := range results {
+		var compileStr string
+		if r.CompileTime > 0 {
+			compileStr = fmtMs(r.CompileTime) + " ms"
+		} else {
+			compileStr = "N/A"
+		}
+
+		version := r.Version
+		if version == "" {
+			version = "unknown"
+		}
+
+		padLang := fmt.Sprintf("%-*s", maxLangLen, r.Language)
+		colorStatus := colorizeStatus(r.Status)
+
+		fmt.Fprintf(os.Stdout, "%s: %d/%d runs | %s | version: %s | compile: %s\n",
+			padLang, r.Successes, r.TotalRuns, colorStatus, version, compileStr)
+	}
+}
+
+// renderPerformanceTable renders benchmark performance metrics purely, omitting summary metadata.
+func renderPerformanceTable(results []benchmark.BenchmarkResult) {
 	t := table.NewWriter()
 	t.SetOutputMirror(os.Stdout)
 
 	t.SetTitle("Benchmark Results (sorted by median execution time)")
 
 	t.AppendHeader(table.Row{
-		"Language", "Compile (ms)", "Median (ms)", "Avg (ms)", "Min (ms)", "Max (ms)", "Runs",
+		"Language", "Median(ms)", "Avg(ms)", "Min(ms)", "Max(ms)", "Mem Median(MB)", "Mem-Avg(MB)",
 	})
 
 	for _, r := range results {
-		status := fmt.Sprintf("%d/%d", r.Successes, r.TotalRuns)
-		if r.Timeouts > 0 {
-			status += fmt.Sprintf(" (%d timeout)", r.Timeouts)
-		}
-		if r.Failures > 0 {
-			status += fmt.Sprintf(" (%d failed)", r.Failures)
+		var medianFmt, avgFmt, minFmt, maxFmt, memMedFmt, memAvgFmt string
+
+		if r.Status == benchmark.StatusOK {
+			medianFmt = fmtMs(r.Stats.Median)
+			avgFmt = fmtMs(r.Stats.Avg)
+			minFmt = fmtMs(r.Stats.Min)
+			maxFmt = fmtMs(r.Stats.Max)
+			memMedFmt = fmtMem(r.Stats.MemMedian)
+			memAvgFmt = fmtMem(r.Stats.MemAvg)
+		} else {
+			medianFmt = "N/A"
+			avgFmt = "N/A"
+			minFmt = "N/A"
+			maxFmt = "N/A"
+			memMedFmt = "N/A"
+			memAvgFmt = "N/A"
 		}
 
 		t.AppendRow(table.Row{
 			r.Language,
-			fmtMs(r.CompileTime),
-			fmtMs(r.Stats.Median),
-			fmtMs(r.Stats.Avg),
-			fmtMs(r.Stats.Min),
-			fmtMs(r.Stats.Max),
-			status,
+			medianFmt,
+			avgFmt,
+			minFmt,
+			maxFmt,
+			memMedFmt,
+			memAvgFmt,
 		})
 	}
 
@@ -156,6 +280,7 @@ func printResultsTable(results []benchmark.BenchmarkResult) {
 		{Number: 4, Align: text.AlignRight},
 		{Number: 5, Align: text.AlignRight},
 		{Number: 6, Align: text.AlignRight},
+		{Number: 7, Align: text.AlignRight},
 	})
 
 	t.Render()
@@ -164,4 +289,11 @@ func printResultsTable(results []benchmark.BenchmarkResult) {
 // fmtMs formats a duration as milliseconds with 2 decimal places.
 func fmtMs(d time.Duration) string {
 	return fmt.Sprintf("%.2f", float64(d.Microseconds())/1000.0)
+}
+
+func fmtMem(mb float64) string {
+	if mb == 0 {
+		return "N/A"
+	}
+	return fmt.Sprintf("%.2f", mb)
 }

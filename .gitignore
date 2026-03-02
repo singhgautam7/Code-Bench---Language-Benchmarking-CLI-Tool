@@ -1,5 +1,7 @@
 # Binaries
 codebench
+*.json
+*.csv
 *.exe
 *.exe~
 *.dll

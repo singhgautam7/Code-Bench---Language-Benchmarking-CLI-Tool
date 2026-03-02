@@ -1,6 +1,6 @@
 package main
 
-import "github.com/gautam/codebench/cmd"
+import "github.com/singhgautam7/Code-Bench---Language-Benchmarking-CLI-Tool/cmd"
 
 func main() {
 	cmd.Execute()

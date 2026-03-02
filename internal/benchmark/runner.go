@@ -2,10 +2,10 @@ package benchmark
 
 import (
 	"fmt"
-	"os"
+	"sync"
 	"time"
 
-	"github.com/gautam/codebench/internal/problems"
+	"github.com/singhgautam7/Code-Bench---Language-Benchmarking-CLI-Tool/internal/problems"
 )
 
 // RunConfig holds the configuration for a benchmark run.
@@ -16,104 +16,118 @@ type RunConfig struct {
 	Runs      int
 	Warmup    int
 	TimeoutMs int
+	Parallel  int
+	Verbose   bool
 }
 
-// RunBenchmark executes the full benchmark pipeline for all specified languages:
-// Docker build → warmup runs → measured runs → compute statistics.
-func RunBenchmark(config RunConfig) ([]BenchmarkResult, error) {
+// RunBenchmark executes the full benchmark pipeline for all specified languages.
+// It supports parallel execution across languages, limited by config.Parallel.
+func RunBenchmark(config RunConfig) (RunMetadata, []BenchmarkResult, error) {
 	inputPath, err := problems.GetInputPath(config.Problem.Name, config.InputSize)
 	if err != nil {
-		return nil, err
+		return RunMetadata{}, nil, err
 	}
+
+	metadata := CaptureMetadata(config)
 
 	var results []BenchmarkResult
+	var resultsMutex sync.Mutex
+
+	// Default to sequential if Parallel is not set
+	parallels := config.Parallel
+	if parallels <= 0 {
+		parallels = 1
+	}
+
+	sem := make(chan struct{}, parallels)
+	var wg sync.WaitGroup
 
 	for _, lang := range config.Languages {
-		fmt.Fprintf(os.Stderr, "\n━━━ %s ━━━\n", lang)
+		wg.Add(1)
+		go func(l string) {
+			defer wg.Done()
+			sem <- struct{}{}        // Acquire token
+			defer func() { <-sem }() // Release token
 
-		result, err := benchmarkLanguage(config, lang, inputPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ Skipping %s: %v\n", lang, err)
-			continue
-		}
+			result := benchmarkLanguage(config, l, inputPath)
 
-		results = append(results, *result)
+			resultsMutex.Lock()
+			results = append(results, result)
+			resultsMutex.Unlock()
+		}(lang)
 	}
 
-	if len(results) == 0 {
-		return nil, fmt.Errorf("no successful benchmarks completed")
-	}
-
-	return results, nil
+	wg.Wait()
+	return metadata, results, nil
 }
 
-// benchmarkLanguage runs the complete benchmark for a single language.
-func benchmarkLanguage(config RunConfig, lang, inputPath string) (*BenchmarkResult, error) {
-	// Resolve language directory
+// benchmarkLanguage runs the complete benchmark for a single language sequentially.
+func benchmarkLanguage(config RunConfig, lang, inputPath string) BenchmarkResult {
+	result := BenchmarkResult{
+		Language:  lang,
+		TotalRuns: config.Runs,
+	}
+
 	langDir, err := problems.GetLanguageDir(config.Problem.Name, lang)
 	if err != nil {
-		return nil, err
+		result.Status = StatusBuildError
+		return result
 	}
 
-	// Step 1: Docker Build
-	fmt.Fprintf(os.Stderr, "  ▸ Building Docker image...\n")
-	buildTime, err := BuildImage(config.Problem.Name, lang, langDir)
+	buildTime, err := BuildImage(config.Problem.Name, lang, langDir, config.Verbose)
+	result.CompileTime = buildTime
+
 	if err != nil {
-		return nil, fmt.Errorf("build failed: %w", err)
+		result.Status = StatusBuildError
+		return result
 	}
-	fmt.Fprintf(os.Stderr, "  ✓ Build completed in %s\n", formatDuration(buildTime))
 
 	imageName := fmt.Sprintf("codebench/%s/%s", config.Problem.Name, lang)
+	result.Version = GetLanguageVersion(imageName, lang)
 
-	// Step 2: Warmup Runs
+	// Warmup Runs
 	if config.Warmup > 0 {
-		fmt.Fprintf(os.Stderr, "  ▸ Running %d warmup run(s)...\n", config.Warmup)
 		for i := 0; i < config.Warmup; i++ {
-			_, _, err := RunContainer(imageName, inputPath, config.TimeoutMs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "    ⚠ Warmup run %d failed: %v\n", i+1, err)
-			}
+			// Discard warmup returns
+			RunContainer(imageName, inputPath, config.TimeoutMs, config.Verbose)
 		}
 	}
 
-	// Step 3: Measured Runs
-	fmt.Fprintf(os.Stderr, "  ▸ Running %d measured run(s)...\n", config.Runs)
+	// Measured Runs
 	var successTimes []time.Duration
-	failures := 0
-	timeouts := 0
+	var successMems []float64
 
 	for i := 0; i < config.Runs; i++ {
-		execTime, _, err := RunContainer(imageName, inputPath, config.TimeoutMs)
+		execTime, memMB, _, err := RunContainer(imageName, inputPath, config.TimeoutMs, config.Verbose)
 		if err != nil {
 			if isTimeout(err) {
-				timeouts++
-				fmt.Fprintf(os.Stderr, "    ⚠ Run %d: TIMEOUT\n", i+1)
+				result.Timeouts++
 			} else {
-				failures++
-				fmt.Fprintf(os.Stderr, "    ⚠ Run %d failed: %v\n", i+1, err)
+				result.Failures++
 			}
 			continue
 		}
 		successTimes = append(successTimes, execTime)
-		fmt.Fprintf(os.Stderr, "    Run %d: %s\n", i+1, formatDuration(execTime))
+		successMems = append(successMems, memMB)
 	}
 
-	// Step 4: Compute Statistics
+	result.Successes = len(successTimes)
+
 	if len(successTimes) == 0 {
-		return nil, fmt.Errorf("all %d runs failed (failures: %d, timeouts: %d)", config.Runs, failures, timeouts)
+		if result.Timeouts > 0 && result.Failures == 0 {
+			result.Status = StatusTimeout
+		} else if result.Failures > 0 && result.Timeouts == 0 {
+			result.Status = StatusFailed
+		} else {
+			result.Status = StatusNoSuccessfulRuns
+		}
+		return result
 	}
 
-	stats := ComputeStats(successTimes)
+	result.Stats = ComputeStats(successTimes, successMems)
+	result.Status = StatusOK
 
-	return &BenchmarkResult{
-		Language:    lang,
-		CompileTime: buildTime,
-		Stats:       stats,
-		TotalRuns:   config.Runs,
-		Successes:   len(successTimes),
-		Failures:    failures,
-		Timeouts:    timeouts,
-	}, nil
+	return result
 }
 
 // isTimeout checks if an error is a timeout error.

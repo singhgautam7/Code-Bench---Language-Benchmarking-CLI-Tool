@@ -1,5 +1,8 @@
-FROM python:3.13-slim
+FROM ruby:3.3
+
 RUN apt-get update && apt-get install -y time && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-COPY main.py .
-CMD ["python", "main.py"]
+COPY main.rb .
+
+CMD ["ruby", "main.rb"]

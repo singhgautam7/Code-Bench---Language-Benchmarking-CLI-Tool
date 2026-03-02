@@ -5,3 +5,7 @@ languages:
   - python
   - go
   - cpp
+  - java
+  - ruby
+  - node
+  - rust
