@@ -8,12 +8,13 @@ import (
 )
 
 var Verbose bool
+var NoSpinner bool
 var globalSpinner *spinner.Spinner
 
 // StartSpinner instantiates and runs a background spinner until stopped.
-// It is a no-op if the CLI is running in verbose mode.
+// It is a no-op if the CLI is running in verbose mode or spinner is disabled.
 func StartSpinner(suffix string) {
-	if Verbose {
+	if Verbose || NoSpinner {
 		return
 	}
 

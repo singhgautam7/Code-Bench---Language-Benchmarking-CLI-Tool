@@ -1,0 +1,11 @@
+name: linear_search
+input_mode: stdin
+timeout_ms: 5000
+languages:
+  - python
+  - go
+  - cpp
+  - java
+  - ruby
+  - node
+  - rust

@@ -11,6 +11,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/singhgautam7/Code-Bench---Language-Benchmarking-CLI-Tool/internal/benchmark"
 	"github.com/singhgautam7/Code-Bench---Language-Benchmarking-CLI-Tool/internal/export"
@@ -27,7 +28,10 @@ var (
 	flagParallel  int
 	flagExport    string
 	flagVerbose   bool
+	flagNoSpinner bool
 )
+
+const Version = "0.2.0"
 
 var runCmd = &cobra.Command{
 	Use:   "run <problem>",
@@ -48,6 +52,7 @@ func init() {
 	runCmd.Flags().IntVar(&flagParallel, "parallel", 1, "Max number of concurrent language benchmarks")
 	runCmd.Flags().StringVar(&flagExport, "export", "", "Export results to file (.json or .csv)")
 	runCmd.Flags().BoolVar(&flagVerbose, "show-all-logs", false, "Show full Docker and command logs (disables progress bars)")
+	runCmd.Flags().BoolVar(&flagNoSpinner, "no-spinner", false, "Disable spinner animation")
 
 	rootCmd.AddCommand(runCmd)
 }
@@ -57,6 +62,11 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 
 	// Sync verbose state across UI models
 	ui.Verbose = flagVerbose
+
+	// Determine spinner suppression rules
+	isCI := os.Getenv("CI") == "true"
+	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	ui.NoSpinner = flagNoSpinner || isCI || !isTTY
 
 	// Load problem spec first (gives useful errors even without Docker)
 	spec, err := problems.LoadProblem(problemName)
@@ -91,19 +101,23 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 		timeoutMs = 2000 // default fallback
 	}
 
-	// Print configuration if not verbose (verbose implies a mess of logs anyway, but let's keep header)
-	fmt.Fprintf(os.Stderr, "╔══════════════════════════════════════════╗\n")
-	fmt.Fprintf(os.Stderr, "║          CodeBench — Phase 2             ║\n")
-	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════════╝\n")
-	fmt.Fprintf(os.Stderr, "  Problem:   %s\n", spec.Name)
-	fmt.Fprintf(os.Stderr, "  Languages: %s\n", strings.Join(langs, ", "))
-	fmt.Fprintf(os.Stderr, "  Input:     %s\n", flagInput)
-	fmt.Fprintf(os.Stderr, "  Runs:      %d (warmup: %d)\n", flagRuns, flagWarmup)
-	fmt.Fprintf(os.Stderr, "  Timeout:   %dms\n", timeoutMs)
-	fmt.Fprintf(os.Stderr, "  Parallel:  %d\n", flagParallel)
-	fmt.Fprintf(os.Stderr, "  Export:    %s\n", flagExport)
-	if flagVerbose {
-		fmt.Fprintf(os.Stderr, "  Output:    Verbose (--show-all-logs)\n")
+	// Print minimalist header if not verbose
+	if !flagVerbose {
+		fmt.Fprintf(os.Stderr, "codebench v%s\n", Version)
+		fmt.Fprintf(os.Stderr, "problem: %s\n", spec.Name)
+		fmt.Fprintf(os.Stderr, "langs: %s\n", strings.Join(langs, ", "))
+		fmt.Fprintf(os.Stderr, "input: %s | runs: %d (warmup: %d)", flagInput, flagRuns, flagWarmup)
+		if flagParallel > 1 {
+			fmt.Fprintf(os.Stderr, " | parallel: %d", flagParallel)
+		}
+		if flagExport != "" {
+			fmt.Fprintf(os.Stderr, " | export: %s", flagExport)
+		}
+		fmt.Fprintf(os.Stderr, "\n\n")
+
+		if ui.NoSpinner {
+			fmt.Fprintf(os.Stderr, "Benchmarking, please wait...\n")
+		}
 	}
 
 	// Run benchmarks
@@ -120,7 +134,9 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 
 	ui.StartSpinner(" Benchmarking, please wait...")
 
+	benchStart := time.Now()
 	metadata, results, err := benchmark.RunBenchmark(config)
+	benchDuration := time.Since(benchStart)
 
 	ui.StopSpinner()
 
@@ -145,16 +161,18 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr)
 	renderSummaryLines(results)
 	fmt.Fprintln(os.Stderr)
-	renderPerformanceTable(results)
+	if len(results) > 0 {
+		renderPerformanceTable(results)
+	}
 
 	// Handle Export
 	if flagExport != "" {
+		ext := strings.ToLower(filepath.Ext(flagExport))
 		report := export.Report{
 			Metadata: metadata,
 			Results:  results,
 		}
 
-		ext := strings.ToLower(filepath.Ext(flagExport))
 		var exportErr error
 
 		if ext == ".json" {
@@ -173,7 +191,19 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Print total duration
+	fmt.Fprintf(os.Stdout, "\ntotal duration: %s\n", formatTotalDuration(benchDuration))
+
 	return nil
+}
+
+// formatTotalDuration returns milliseconds if < 1s, else nicely formatted seconds
+func formatTotalDuration(d time.Duration) string {
+	ms := float64(d.Microseconds()) / 1000.0
+	if ms >= 1000 {
+		return fmt.Sprintf("%.2fs", ms/1000.0)
+	}
+	return fmt.Sprintf("%.2fms", ms)
 }
 
 // ANSI Escape Codes
@@ -242,11 +272,18 @@ func renderPerformanceTable(results []benchmark.BenchmarkResult) {
 		"Language", "Median(ms)", "Avg(ms)", "Min(ms)", "Max(ms)", "Mem Median(MB)", "Mem-Avg(MB)",
 	})
 
+	winnerSet := false
+
 	for _, r := range results {
 		var medianFmt, avgFmt, minFmt, maxFmt, memMedFmt, memAvgFmt string
 
 		if r.Status == benchmark.StatusOK {
-			medianFmt = fmtMs(r.Stats.Median)
+			if !winnerSet {
+				medianFmt = ColorGreen + fmtMs(r.Stats.Median) + ColorReset
+				winnerSet = true
+			} else {
+				medianFmt = fmtMs(r.Stats.Median)
+			}
 			avgFmt = fmtMs(r.Stats.Avg)
 			minFmt = fmtMs(r.Stats.Min)
 			maxFmt = fmtMs(r.Stats.Max)

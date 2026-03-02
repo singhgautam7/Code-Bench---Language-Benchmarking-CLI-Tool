@@ -14,16 +14,7 @@ import (
 	"time"
 )
 
-// versionCommands maps language names to the command used to retrieve version info.
-var versionCommands = map[string][]string{
-	"python": {"python", "--version"},
-	"go":     {"go", "version"},
-	"cpp":    {"g++", "--version"},
-	"java":   {"java", "-version"},
-	"ruby":   {"ruby", "--version"},
-	"node":   {"node", "--version"},
-	"rust":   {"rustc", "--version"},
-}
+
 
 // BuildImage builds a Docker image for the given problem/language combination.
 // Returns the build duration and any error encountered.
@@ -155,30 +146,22 @@ func RunContainer(imageName, inputPath string, timeoutMs int, verbose bool) (tim
 	return execTime, memMB, 0, nil
 }
 
-// GetLanguageVersion runs the version command inside the container and returns
-// the parsed version string. Returns "unknown" if detection fails.
+// GetLanguageVersion reads the pre-baked version string from /version.txt inside the container image.
+// Returns "unavailable" if detection fails.
 func GetLanguageVersion(imageName, language string) string {
-	versionCmd, ok := versionCommands[language]
-	if !ok {
-		return "unknown"
-	}
+	cmd := exec.Command("docker", "run", "--rm", "--entrypoint", "cat", imageName, "/version.txt")
 
-	args := append([]string{"run", "--rm", "--entrypoint", versionCmd[0], imageName}, versionCmd[1:]...)
-	cmd := exec.Command("docker", args...)
-
-	// Capture both stdout and stderr (java -version writes to stderr)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "unknown"
+		return "unavailable"
 	}
 
-	// Use stdout first, fall back to stderr (java -version uses stderr)
 	output := strings.TrimSpace(stdout.String())
 	if output == "" {
-		output = strings.TrimSpace(stderr.String())
+		return "unavailable"
 	}
 
 	// Take first line only

@@ -108,11 +108,71 @@ codebench run binary_search --parallel 3 --export report.csv
 
 ---
 
+## 📚 Benchmark Problems
+
+Our benchmarking philosophy centers around four core principles prioritizing architectural accuracy:
+1. **Deterministic**: Every execution runs identical, non-random seeded data structures to ensure runs remain fundamentally equal.
+2. **Reproducible**: Operations rely entirely on scoped static inputs avoiding network and dynamic system interactions.
+3. **Idiomatic implementations**: Code leverages standard, native-language constructs representing conventional execution patterns (e.g. leveraging STL in C++, standard HashMaps in Java).
+4. **Cross-language fairness**: All implementations strictly obey bounded $O()$ constraints representing identical data mutations without micro-optimizations or raw memory hacks.
+
+### Numeric Algorithms
+* `sum_of_n`: Absolute baseline accumulator loop ceiling.
+* `fibonacci`: Iterative array loop counting simulating dynamic programming patterns.
+* `factorial`: BigInt array multiplications stretching standard primitive constraints.
+* `prime_count`: Memory-intensive `Sieve of Eratosthenes` boolean tracking.
+* `matrix_multiplication`: Heavy $O(N^3)$ computational math parsing arrays of arrays.
+* `gcd`: Euclidean remainder overhead testing modulus pipelines.
+
+### String Algorithms
+* `palindrome`: Large contiguous string reversions testing string equality speeds.
+* `longest_substring`: Dynamic sliding window logic assessing map tracking boundaries.
+* `string_concat`: Aggressive string re-allocation appending tests measuring immutable limits.
+
+### Sorting / Searching
+* `quicksort`: Stack-heavy recursive pointer swaps testing divide-and-conquer branching.
+* `mergesort`: Large-scale continuous array heap allocation testing.
+* `binary_search`: Sorted array halving sweeps.
+* `linear_search`: Baseline contiguous array memory scanning.
+
+### Graph Algorithms
+* `bfs`: Standard Array Queuing network traversals.
+* `dfs`: Callstack limit recursion network traversals.
+* `dijkstra`: Priority-Queue shortest path heap allocations mapping edge weights.
+
+### Data Structure Benchmarks
+* `hashmap_insert`: Collision and structural reallocation load testing of core Map models.
+
+### Parsing / IO
+* `json_parsing`: Deserializing structured, nested tree logic heavily favoring language `std` libraries.
+* `word_frequency`: Tokenizing large String arrays parsing into dynamic hash counts.
+* `line_count`: Stdin IO buffer streaming tests slicing across `\n`.
+
+> The README must always be updated whenever new commands, flags, features, languages, problems, or architectural changes are introduced. It is the single source of truth for usage and capabilities.
+
+---
+
+## Branding & Output Design
+
+CodeBench employs an ultra-minimal, tool-like CLI aesthetic.
+
+![CodeBench Output](assets/example_screenshot.png)
+
+- **Compact Branding:** Bypasses heavy ASCII boxes or sprawling metadata dumps for deeply condensed layout headers mapping exact versions alongside your benchmarking configuration parameters.
+- **Duration Summary:** Post-benchmark executions tally a `total duration` tracking overhead, accurately converting from `X.YYms` to `Z.WZs` relative decimal displays dynamically.
+- **Subtlety in Performance Highlighting:** Scanning the clean output format, CodeBench visually isolates and surfaces the absolute winner algorithm. The lowest `Median(ms)` record belonging to an `OK` valid status sequence prints exclusively highlighted in ANSI green strings (`\033[32m`), optimizing read times.
+
+---
+
 ## Output Modes
 
 CodeBench hides messy Docker build traces, raw internal compiler warnings, and runtime environment noise by default, opting instead for a clean **Global Spinner**.
 
 - **Quiet (Default):** CodeBench parses daemon executions actively in the background, rendering a minimalist `⠋ Benchmarking, please wait...` loader. We avoid percentage progress bars because Docker daemon pulls, cache resolutions, and compilation routines have implicitly volatile unknown durations.
+- **Spinner Control:**
+  - Standard implementations run the interactive `github.com/briandowns/spinner` package across multi-language metrics automatically.
+  - `--no-spinner`: Provide this global toggle if you would prefer silent locks replacing the graphical loader.
+  - **CI & System Overrides:** The spinner automatically aborts and defers to `--no-spinner` logging traits out-of-the-box if the execution environment carries `CI=true` global variables or the shell executes stripped of robust interactive TTY dimensions (`term.IsTerminal` checks).
 - **Verbose Tracking:** To observe exact compilation bottlenecks, container crashes, or low-level metrics collection passing, append the verbose toggle enabling direct routing to `stderr` and `stdout`:
 
 ```bash
@@ -263,13 +323,3 @@ CodeBench/
 ```
 
 ---
-
-## Maintenance Rule
-
-> **The README must always be updated whenever new commands, flags, features, languages, or architectural changes are introduced. It is the single source of truth.**
-
----
-
-## License
-
-MIT
